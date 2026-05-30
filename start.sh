@@ -22,6 +22,12 @@ set -u
 SM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDFILE="$SM_DIR/motion.pid"
 
+# Load secrets (Telegram bot token + chat id) from secrets.env if present.
+# This file is gitignored; see secrets.env.example for the format.
+if [ -f "$SM_DIR/secrets.env" ]; then
+    set -a; . "$SM_DIR/secrets.env"; set +a
+fi
+
 # Optional first arg = arming delay in MINUTES -> detector's SM_ARM_DELAY (seconds).
 DELAY_MIN="${1:-0}"
 export SM_ARM_DELAY="$(awk "BEGIN{print $DELAY_MIN * 60}")"

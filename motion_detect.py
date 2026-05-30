@@ -21,6 +21,8 @@ import time
 import signal
 import shutil
 import logging
+import threading
+import subprocess
 from datetime import datetime
 
 import cv2
@@ -63,6 +65,16 @@ ARM_DELAY = float(os.environ.get("SM_ARM_DELAY", "0"))
 # proof-of-life snapshot itself (a separate ffmpeg grab can't share the camera).
 # Set SM_HEARTBEAT_SECONDS=0 to disable. Default 1800s = 30 min.
 HEARTBEAT_SECONDS = int(os.environ.get("SM_HEARTBEAT_SECONDS", "1800"))
+
+# Telegram push: if a bot token + chat id are set, each motion event is pushed
+# off-device instantly as a photo (real-time alert + off-device copy that does
+# not depend on iCloud sync). Credentials come from secrets.env (gitignored).
+TELEGRAM_TOKEN   = os.environ.get("SM_TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT    = os.environ.get("SM_TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT)
+# Min seconds between photo pushes during one continuous event (avoid flooding
+# your phone; every frame is still saved locally + iCloud regardless).
+TELEGRAM_MIN_INTERVAL = float(os.environ.get("SM_TELEGRAM_MIN_INTERVAL", "30"))
 
 # Optional mask image: white = watch this region, black = ignore. Same size as frame.
 MASK_FILE = os.environ.get("SM_MASK_FILE", os.path.join(BASE_DIR, "mask.png"))
@@ -154,6 +166,43 @@ def save_heartbeat(frame):
     return local_path
 
 
+def _telegram_call(endpoint, fields, photo_path=None):
+    """Blocking curl call to the Telegram Bot API. Run via a daemon thread."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{endpoint}"
+    cmd = ["curl", "-s", "--max-time", "20"]
+    for key, value in fields.items():
+        cmd += ["-F", f"{key}={value}"]
+    if photo_path:
+        cmd += ["-F", f"photo=@{photo_path}"]
+    cmd.append(url)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        if '"ok":true' not in result.stdout:
+            log.warning("Telegram %s failed: %s", endpoint, result.stdout[:200] or result.stderr[:200])
+    except Exception as e:  # network hiccup must never crash the detector
+        log.warning("Telegram %s error: %s", endpoint, e)
+
+
+def telegram_photo(path, caption):
+    if not TELEGRAM_ENABLED:
+        return
+    threading.Thread(
+        target=_telegram_call,
+        args=("sendPhoto", {"chat_id": TELEGRAM_CHAT, "caption": caption}, path),
+        daemon=True,
+    ).start()
+
+
+def telegram_text(text):
+    if not TELEGRAM_ENABLED:
+        return
+    threading.Thread(
+        target=_telegram_call,
+        args=("sendMessage", {"chat_id": TELEGRAM_CHAT, "text": text}),
+        daemon=True,
+    ).start()
+
+
 def main():
     for d in (LOCAL_DIR, ICLOUD_DIR, HB_LOCAL_DIR, HB_ICLOUD_DIR):
         os.makedirs(d, exist_ok=True)
@@ -173,6 +222,7 @@ def main():
         CAMERA_INDEX, WIDTH, HEIGHT, THRESHOLD, NOISE_LEVEL, MINIMUM_MOTION_FRAMES,
         EVENT_INTERVAL, EVENT_TAIL, HEARTBEAT_SECONDS, ARM_DELAY,
     )
+    log.info("Telegram alerts: %s", "ENABLED" if TELEGRAM_ENABLED else "disabled (no token/chat id)")
 
     background = None          # float32 running-average frame
     mask = None
@@ -180,6 +230,7 @@ def main():
     last_save = 0.0
     last_heartbeat = 0.0       # 0 => emit one immediately after warm-up
     event_until = 0.0          # keep saving burst frames until this time
+    last_telegram = 0.0        # throttle photo pushes during a long event
     last_countdown_log = 0.0
     armed_announced = ARM_DELAY <= 0
     arm_time = time.time() + ARM_DELAY
@@ -232,6 +283,7 @@ def main():
 
         if not armed_announced:
             log.info("ARMED — motion detection active.")
+            telegram_text("🔒 Security monitor ARMED — watching the room.")
             armed_announced = True
 
         # Difference against the running-average background.
@@ -255,6 +307,7 @@ def main():
         else:
             motion_streak = 0
 
+        event_was_active = now < event_until   # was an event already open?
         if motion_streak >= MINIMUM_MOTION_FRAMES:
             event_until = now + EVENT_TAIL
 
@@ -262,6 +315,10 @@ def main():
             path = save_snapshot(frame)
             log.info("Motion event (area=%d) -> %s", int(changed_area), os.path.basename(path))
             last_save = now
+            # Push to Telegram on a NEW event, then throttle during a long one.
+            if not event_was_active or (now - last_telegram) >= TELEGRAM_MIN_INTERVAL:
+                telegram_photo(path, caption=f"⚠️ Motion {datetime.now():%H:%M:%S}")
+                last_telegram = now
 
         time.sleep(min_interval)
 

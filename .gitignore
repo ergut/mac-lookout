@@ -8,6 +8,9 @@ heartbeat/
 # Optional ROI mask (user-specific)
 mask.png
 
+# Secrets (Telegram bot token + chat id) — never commit
+secrets.env
+
 # Logs and runtime state
 *.log
 motion.pid

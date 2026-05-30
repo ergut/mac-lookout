@@ -105,7 +105,7 @@ _running = True
 # Shared state for the Telegram command listener (running in a daemon thread).
 _frame_lock = threading.Lock()
 _latest_frame = None          # most recent BGR frame, for on-demand /photo
-STATE = {"armed": False, "events": 0, "started": 0.0, "arm_time": 0.0}
+STATE = {"armed": False, "events": 0, "started": 0.0, "arm_time": 0.0, "pause_until": 0.0}
 
 
 def _set_latest_frame(frame):
@@ -241,9 +241,22 @@ def send_ondemand_photo(reason="On-demand"):
                    local_path)
 
 
+HELP_TEXT = (
+    "🛡️ Security monitor commands:\n"
+    "/photo — grab a picture right now\n"
+    "/status — armed/paused state, event count, uptime\n"
+    "/pause [min] — pause detection (default 10 min), auto-rearms\n"
+    "/resume — resume detection now\n"
+    "/help — show this message"
+)
+
+
 def _status_text():
     now = time.time()
-    if STATE.get("armed"):
+    pause_left = int(STATE.get("pause_until", 0.0) - now)
+    if pause_left > 0:
+        mode = f"⏸ PAUSED ({pause_left // 60}m {pause_left % 60}s left)"
+    elif STATE.get("armed"):
         mode = "🔒 ARMED"
     else:
         rem = int(STATE.get("arm_time", now) - now)
@@ -290,12 +303,31 @@ def telegram_listener():
             if chat_id != str(TELEGRAM_CHAT):
                 continue   # SECURITY: ignore anyone but the configured owner
             text = (msg.get("text") or "").strip().lower()
-            if text in ("/photo", "/snap", "/pic"):
+            parts = text.split()
+            cmd = parts[0] if parts else ""
+            if cmd in ("/photo", "/snap", "/pic"):
                 send_ondemand_photo()
-            elif text.startswith("/status"):
+            elif cmd == "/status":
                 telegram_text(_status_text())
-            elif text.startswith("/start") or text.startswith("/help"):
-                telegram_text("Commands:\n/photo — grab a picture now\n/status — monitor status")
+            elif cmd == "/pause":
+                mins = 10.0
+                if len(parts) > 1:
+                    try:
+                        mins = float(parts[1])
+                    except ValueError:
+                        telegram_text("Usage: /pause <minutes>  (e.g. /pause 10)")
+                        continue
+                STATE["pause_until"] = time.time() + mins * 60
+                telegram_text(f"⏸ Paused for {mins:g} min — detection off. Auto-rearms after, "
+                              f"or send /resume.")
+            elif cmd == "/resume":
+                if STATE.get("pause_until", 0.0) > time.time():
+                    STATE["pause_until"] = 0.0
+                    telegram_text("▶️ Resumed — detection on.")
+                else:
+                    telegram_text("Already active — nothing to resume.")
+            elif cmd in ("/start", "/help"):
+                telegram_text(HELP_TEXT)
 
 
 def main():
@@ -328,6 +360,7 @@ def main():
     last_telegram = 0.0        # throttle photo pushes during a long event
     last_countdown_log = 0.0
     armed_announced = ARM_DELAY <= 0
+    paused_prev = False
     arm_time = time.time() + ARM_DELAY
     frame_count = 0
     min_interval = 1.0 / max(FRAMERATE, 1)
@@ -372,16 +405,25 @@ def main():
             log.info("Heartbeat saved -> %s", os.path.basename(hb))
             last_heartbeat = now
 
-        # Arming delay: keep the baseline current and DON'T detect yet, so you
-        # can walk out without tripping it. Detection begins once armed.
-        if now < arm_time:
+        # Suppress detection during (a) the initial arming delay so you can walk
+        # out, or (b) an active /pause. In both cases keep the baseline current.
+        paused = now < STATE.get("pause_until", 0.0)
+        if now < arm_time or paused:
             background = gray.astype("float32")
-            if now - last_countdown_log >= 30:
+            if now < arm_time and now - last_countdown_log >= 30:
                 log.info("Disarmed — detection starts in %ds (leave the room).",
                          int(arm_time - now))
                 last_countdown_log = now
+            paused_prev = paused
             time.sleep(min_interval)
             continue
+
+        # Just came out of a pause -> let you know detection is back on.
+        if paused_prev:
+            paused_prev = False
+            if armed_announced:
+                log.info("Pause ended — ARMED.")
+                telegram_text("▶️ Pause ended — monitor ARMED again.")
 
         if not armed_announced:
             log.info("ARMED — motion detection active.")

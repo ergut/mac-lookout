@@ -27,7 +27,6 @@ import subprocess
 from datetime import datetime
 
 import cv2
-import numpy as np
 
 HOME = os.path.expanduser("~")
 # Base dir = the folder this script lives in (the project folder), overridable.
@@ -184,16 +183,21 @@ def save_heartbeat(frame):
 
 
 def _telegram_call(endpoint, fields, photo_path=None):
-    """Blocking curl call to the Telegram Bot API. Run via a daemon thread."""
+    """Blocking curl call to the Telegram Bot API. Run via a daemon thread.
+
+    The token-bearing URL is fed to curl via stdin (-K -), NOT as an argv
+    element, so the bot token never shows up in `ps`/process listings.
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{endpoint}"
     cmd = ["curl", "-s", "--max-time", "20"]
     for key, value in fields.items():
         cmd += ["-F", f"{key}={value}"]
     if photo_path:
         cmd += ["-F", f"photo=@{photo_path}"]
-    cmd.append(url)
+    cmd += ["-K", "-"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        result = subprocess.run(cmd, input=f'url="{url}"\n',
+                                capture_output=True, text=True, timeout=25)
         if '"ok":true' not in result.stdout:
             log.warning("Telegram %s failed: %s", endpoint, result.stdout[:200] or result.stderr[:200])
     except Exception as e:  # network hiccup must never crash the detector
@@ -273,9 +277,10 @@ def _telegram_get_updates(offset, timeout):
     cmd = ["curl", "-s", "--max-time", str(timeout + 10), "-F", f"timeout={timeout}"]
     if offset is not None:
         cmd += ["-F", f"offset={offset}"]
-    cmd.append(url)
+    cmd += ["-K", "-"]   # URL (with token) via stdin, not argv
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 15)
+        result = subprocess.run(cmd, input=f'url="{url}"\n',
+                                capture_output=True, text=True, timeout=timeout + 15)
         data = json.loads(result.stdout or "{}")
         if not data.get("ok"):
             if "Conflict" in data.get("description", ""):
@@ -290,7 +295,7 @@ def _telegram_get_updates(offset, timeout):
 
 def telegram_listener():
     """Daemon loop: handle /photo and /status from the owner chat only."""
-    log.info("Telegram command listener active (/photo, /status).")
+    log.info("Telegram command listener active (/photo /status /pause /resume /help).")
     # Drain stale updates so old commands aren't replayed on startup.
     offset = None
     for u in _telegram_get_updates(None, timeout=0):

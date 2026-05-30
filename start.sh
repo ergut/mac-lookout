@@ -46,7 +46,7 @@ if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     kill "$(cat "$PIDFILE")" 2>/dev/null
     sleep 1
 fi
-pkill -f "motion-security/motion_detect.py" 2>/dev/null
+pkill -f "$SM_DIR/motion_detect.py" 2>/dev/null
 sleep 1
 
 # --- Start the detector under caffeinate, in the background ---

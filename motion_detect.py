@@ -17,6 +17,7 @@ All knobs are overridable via environment variables (see start.sh).
 
 import os
 import sys
+import json
 import time
 import signal
 import shutil
@@ -100,6 +101,22 @@ logging.basicConfig(
 log = logging.getLogger("motion")
 
 _running = True
+
+# Shared state for the Telegram command listener (running in a daemon thread).
+_frame_lock = threading.Lock()
+_latest_frame = None          # most recent BGR frame, for on-demand /photo
+STATE = {"armed": False, "events": 0, "started": 0.0, "arm_time": 0.0}
+
+
+def _set_latest_frame(frame):
+    global _latest_frame
+    with _frame_lock:
+        _latest_frame = frame
+
+
+def _get_latest_frame():
+    with _frame_lock:
+        return None if _latest_frame is None else _latest_frame.copy()
 
 
 def _stop(signum, _frame):
@@ -203,6 +220,84 @@ def telegram_text(text):
     ).start()
 
 
+def send_ondemand_photo(reason="On-demand"):
+    """Grab the most recent frame and push it to Telegram immediately."""
+    frame = _get_latest_frame()
+    if frame is None:
+        telegram_text("📷 Camera not ready yet — try again in a moment.")
+        return
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{ts}_ondemand.jpg"
+    local_path = os.path.join(LOCAL_DIR, filename)
+    cv2.imwrite(local_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+    try:
+        shutil.copy2(local_path, os.path.join(ICLOUD_DIR, filename))
+    except OSError as e:
+        log.error("iCloud copy failed for %s: %s", filename, e)
+    log.info("On-demand photo requested -> %s", filename)
+    # Send synchronously here (we're already in the listener thread).
+    _telegram_call("sendPhoto", {"chat_id": TELEGRAM_CHAT,
+                                 "caption": f"📸 {reason} {datetime.now():%H:%M:%S}"},
+                   local_path)
+
+
+def _status_text():
+    now = time.time()
+    if STATE.get("armed"):
+        mode = "🔒 ARMED"
+    else:
+        rem = int(STATE.get("arm_time", now) - now)
+        mode = f"🟡 DISARMED (arming in {rem}s)" if rem > 0 else "🟡 starting…"
+    up = int(now - STATE.get("started", now))
+    return (f"📊 Status: {mode}\n"
+            f"Motion events: {STATE.get('events', 0)}\n"
+            f"Uptime: {up // 3600}h {(up % 3600) // 60}m")
+
+
+def _telegram_get_updates(offset, timeout):
+    """Long-poll Telegram for incoming commands. Returns a list of updates."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    cmd = ["curl", "-s", "--max-time", str(timeout + 10), "-F", f"timeout={timeout}"]
+    if offset is not None:
+        cmd += ["-F", f"offset={offset}"]
+    cmd.append(url)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 15)
+        data = json.loads(result.stdout or "{}")
+        if not data.get("ok"):
+            if "Conflict" in data.get("description", ""):
+                time.sleep(3)   # another poller is running; back off
+            return []
+        return data.get("result", [])
+    except Exception as e:
+        log.warning("Telegram getUpdates error: %s", e)
+        time.sleep(3)
+        return []
+
+
+def telegram_listener():
+    """Daemon loop: handle /photo and /status from the owner chat only."""
+    log.info("Telegram command listener active (/photo, /status).")
+    # Drain stale updates so old commands aren't replayed on startup.
+    offset = None
+    for u in _telegram_get_updates(None, timeout=0):
+        offset = u["update_id"] + 1
+    while _running:
+        for u in _telegram_get_updates(offset, timeout=25):
+            offset = u["update_id"] + 1
+            msg = u.get("message") or u.get("edited_message") or {}
+            chat_id = str((msg.get("chat") or {}).get("id", ""))
+            if chat_id != str(TELEGRAM_CHAT):
+                continue   # SECURITY: ignore anyone but the configured owner
+            text = (msg.get("text") or "").strip().lower()
+            if text in ("/photo", "/snap", "/pic"):
+                send_ondemand_photo()
+            elif text.startswith("/status"):
+                telegram_text(_status_text())
+            elif text.startswith("/start") or text.startswith("/help"):
+                telegram_text("Commands:\n/photo — grab a picture now\n/status — monitor status")
+
+
 def main():
     for d in (LOCAL_DIR, ICLOUD_DIR, HB_LOCAL_DIR, HB_ICLOUD_DIR):
         os.makedirs(d, exist_ok=True)
@@ -237,6 +332,12 @@ def main():
     frame_count = 0
     min_interval = 1.0 / max(FRAMERATE, 1)
 
+    # Publish initial state and start the Telegram command listener.
+    STATE.update({"armed": armed_announced, "events": 0,
+                  "started": time.time(), "arm_time": arm_time})
+    if TELEGRAM_ENABLED:
+        threading.Thread(target=telegram_listener, daemon=True).start()
+
     while _running:
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -244,6 +345,7 @@ def main():
             time.sleep(1)
             continue
 
+        _set_latest_frame(frame)   # keep newest frame available for /photo
         frame_count += 1
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (21, 21), 0)
@@ -285,6 +387,7 @@ def main():
             log.info("ARMED — motion detection active.")
             telegram_text("🔒 Security monitor ARMED — watching the room.")
             armed_announced = True
+            STATE["armed"] = True
 
         # Difference against the running-average background.
         delta = cv2.absdiff(gray, cv2.convertScaleAbs(background))
@@ -315,6 +418,7 @@ def main():
             path = save_snapshot(frame)
             log.info("Motion event (area=%d) -> %s", int(changed_area), os.path.basename(path))
             last_save = now
+            STATE["events"] += 1
             # Push to Telegram on a NEW event, then throttle during a long one.
             if not event_was_active or (now - last_telegram) >= TELEGRAM_MIN_INTERVAL:
                 telegram_photo(path, caption=f"⚠️ Motion {datetime.now():%H:%M:%S}")

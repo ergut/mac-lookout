@@ -44,16 +44,24 @@ NOISE_LEVEL           = int(os.environ.get("SM_NOISE_LEVEL", "32"))   # binary d
 MINIMUM_MOTION_FRAMES = int(os.environ.get("SM_MIN_FRAMES", "2"))     # consecutive frames to confirm
 
 # Behaviour
-# Event-burst capture: when motion is confirmed we open an "event window" and
-# keep saving a frame every EVENT_INTERVAL seconds for as long as motion
-# continues, plus EVENT_TAIL seconds after it stops. This yields a *sequence*
-# of the intruder (far more useful than a single frame) without timelapsing an
-# empty room 24/7.
-EVENT_INTERVAL = float(os.environ.get("SM_EVENT_INTERVAL", "1.5"))   # gap between burst frames
-EVENT_TAIL     = float(os.environ.get("SM_EVENT_TAIL", "10.0"))      # keep capturing after motion stops
+# Adaptive event-burst capture: when motion is confirmed we open an "event
+# window" and capture a *sequence*. It is DENSE at the start of an event (to
+# catch a face / identity in the first seconds) and then automatically SLOWS
+# DOWN if activity keeps going (e.g. housekeeping for two minutes), so you don't
+# get hundreds of near-identical frames. Capturing continues EVENT_TAIL seconds
+# after motion stops.
+EVENT_FAST_INTERVAL = float(os.environ.get("SM_EVENT_FAST_INTERVAL", "0.6"))  # gap during the fast phase
+EVENT_FAST_WINDOW   = float(os.environ.get("SM_EVENT_FAST_WINDOW", "10.0"))   # how long the fast phase lasts
+EVENT_SLOW_INTERVAL = float(os.environ.get("SM_EVENT_SLOW_INTERVAL", "3.0"))  # gap during sustained activity
+EVENT_TAIL          = float(os.environ.get("SM_EVENT_TAIL", "10.0"))          # keep capturing after motion stops
 WARMUP_FRAMES  = int(os.environ.get("SM_WARMUP", "30"))             # frames to let exposure settle
 BG_ALPHA       = float(os.environ.get("SM_BG_ALPHA", "0.05"))       # running-avg learning rate
 JPEG_QUALITY   = int(os.environ.get("SM_JPEG_QUALITY", "90"))
+
+# Face detection (uses the Haar cascade bundled with OpenCV — no extra deps).
+# When a face is found in an event frame, that frame is captioned and pushed to
+# Telegram even if the throttle would otherwise skip it. Set SM_FACE_DETECT=0 off.
+FACE_DETECT = os.environ.get("SM_FACE_DETECT", "1") != "0"
 
 # Arming delay: seconds to wait before detection begins, so you can leave the
 # room without tripping it. The camera stays on and keeps the baseline current
@@ -72,8 +80,11 @@ HEARTBEAT_SECONDS = int(os.environ.get("SM_HEARTBEAT_SECONDS", "1800"))
 TELEGRAM_TOKEN   = os.environ.get("SM_TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT    = os.environ.get("SM_TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT)
-# Min seconds between photo pushes during one continuous event (avoid flooding
-# your phone; every frame is still saved locally + iCloud regardless).
+# Front-load alerts: push the first N frames of a new event to Telegram with no
+# throttle (so an approaching person/face actually reaches your phone in the
+# first seconds), THEN fall back to one push per TELEGRAM_MIN_INTERVAL seconds
+# for the rest of a long event. Every frame is still saved locally + iCloud.
+TELEGRAM_BURST        = int(os.environ.get("SM_TELEGRAM_BURST", "4"))
 TELEGRAM_MIN_INTERVAL = float(os.environ.get("SM_TELEGRAM_MIN_INTERVAL", "30"))
 
 # Optional mask image: white = watch this region, black = ignore. Same size as frame.
@@ -158,7 +169,9 @@ def load_mask(shape):
 
 def save_snapshot(frame):
     """Write a JPEG locally and mirror it to iCloud. Returns the local path."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Millisecond precision: the fast phase saves multiple frames per second,
+    # so a 1-second timestamp would collide and overwrite frames.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     filename = f"{ts}_motion.jpg"
     local_path = os.path.join(LOCAL_DIR, filename)
     cv2.imwrite(local_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
@@ -224,6 +237,49 @@ def telegram_text(text):
     ).start()
 
 
+_face_cascade = None
+
+
+def detect_face(frame):
+    """Return True if a frontal face is found (Haar cascade bundled with cv2)."""
+    global _face_cascade
+    if not FACE_DETECT:
+        return False
+    if _face_cascade is None:
+        path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        _face_cascade = cv2.CascadeClassifier(path)
+    if _face_cascade.empty():
+        return False
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+                                           minSize=(60, 60))
+    return len(faces) > 0
+
+
+def play_say(message):
+    """Speak text in the room via the macOS `say` command (non-blocking)."""
+    def run():
+        try:
+            subprocess.run(["say", message], timeout=60)
+        except Exception as e:
+            log.warning("say failed: %s", e)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def play_alarm():
+    """Play an alarm sound in the room via `afplay` (non-blocking)."""
+    def run():
+        sound = os.path.join(BASE_DIR, "alarm.wav")
+        if not os.path.exists(sound):
+            sound = "/System/Library/Sounds/Sosumi.aiff"   # built-in fallback
+        try:
+            for _ in range(5):
+                subprocess.run(["afplay", sound], timeout=30)
+        except Exception as e:
+            log.warning("alarm failed: %s", e)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def send_ondemand_photo(reason="On-demand"):
     """Grab the most recent frame and push it to Telegram immediately."""
     frame = _get_latest_frame()
@@ -251,6 +307,8 @@ HELP_TEXT = (
     "/status — armed/paused state, event count, uptime\n"
     "/pause [min] — pause detection (default 10 min), auto-rearms\n"
     "/resume — resume detection now\n"
+    "/say <text> — speak text aloud in the room\n"
+    "/alarm — sound an alarm in the room\n"
     "/help — show this message"
 )
 
@@ -295,7 +353,7 @@ def _telegram_get_updates(offset, timeout):
 
 def telegram_listener():
     """Daemon loop: handle /photo and /status from the owner chat only."""
-    log.info("Telegram command listener active (/photo /status /pause /resume /help).")
+    log.info("Telegram command listener active (send /help for commands).")
     # Drain stale updates so old commands aren't replayed on startup.
     offset = None
     for u in _telegram_get_updates(None, timeout=0):
@@ -307,13 +365,23 @@ def telegram_listener():
             chat_id = str((msg.get("chat") or {}).get("id", ""))
             if chat_id != str(TELEGRAM_CHAT):
                 continue   # SECURITY: ignore anyone but the configured owner
-            text = (msg.get("text") or "").strip().lower()
-            parts = text.split()
-            cmd = parts[0] if parts else ""
+            raw = (msg.get("text") or "").strip()   # keep original case for /say
+            parts = raw.split()
+            cmd = parts[0].lower() if parts else ""
             if cmd in ("/photo", "/snap", "/pic"):
                 send_ondemand_photo()
             elif cmd == "/status":
                 telegram_text(_status_text())
+            elif cmd == "/say":
+                spoken = raw.split(None, 1)[1].strip() if len(parts) > 1 else ""
+                if spoken:
+                    play_say(spoken)
+                    telegram_text(f"🔊 Speaking in the room: {spoken}")
+                else:
+                    telegram_text("Usage: /say <text to speak in the room>")
+            elif cmd == "/alarm":
+                play_alarm()
+                telegram_text("🚨 Sounding alarm in the room.")
             elif cmd == "/pause":
                 mins = 10.0
                 if len(parts) > 1:
@@ -350,9 +418,10 @@ def main():
 
     log.info(
         "Motion detector started. cam=%s %dx%d threshold=%d noise=%d min_frames=%d "
-        "event_interval=%.1fs tail=%.0fs heartbeat=%ds arm_delay=%.0fs",
+        "fast=%.1fs/%.0fs slow=%.1fs tail=%.0fs heartbeat=%ds arm_delay=%.0fs face=%s",
         CAMERA_INDEX, WIDTH, HEIGHT, THRESHOLD, NOISE_LEVEL, MINIMUM_MOTION_FRAMES,
-        EVENT_INTERVAL, EVENT_TAIL, HEARTBEAT_SECONDS, ARM_DELAY,
+        EVENT_FAST_INTERVAL, EVENT_FAST_WINDOW, EVENT_SLOW_INTERVAL, EVENT_TAIL,
+        HEARTBEAT_SECONDS, ARM_DELAY, "on" if FACE_DETECT else "off",
     )
     log.info("Telegram alerts: %s", "ENABLED" if TELEGRAM_ENABLED else "disabled (no token/chat id)")
 
@@ -362,6 +431,9 @@ def main():
     last_save = 0.0
     last_heartbeat = 0.0       # 0 => emit one immediately after warm-up
     event_until = 0.0          # keep saving burst frames until this time
+    event_start = 0.0          # when the current event began (for fast/slow phase)
+    event_tg_count = 0         # photos pushed to Telegram in the current event
+    event_face_pushed = False  # whether a face frame was already pushed this event
     last_telegram = 0.0        # throttle photo pushes during a long event
     last_countdown_log = 0.0
     armed_announced = ARM_DELAY <= 0
@@ -450,8 +522,7 @@ def main():
         changed_area = sum(cv2.contourArea(c) for c in contours)
 
         # Confirm motion over consecutive frames, then open/extend the event
-        # window. While the window is open we save a frame every EVENT_INTERVAL,
-        # giving a sequence of the intruder rather than a single frame.
+        # window.
         if changed_area >= THRESHOLD:
             motion_streak += 1
         else:
@@ -459,17 +530,39 @@ def main():
 
         event_was_active = now < event_until   # was an event already open?
         if motion_streak >= MINIMUM_MOTION_FRAMES:
+            if not event_was_active:
+                # A NEW event begins: reset the fast-phase clock and per-event
+                # push counters so the first seconds are captured densely.
+                event_start = now
+                event_tg_count = 0
+                event_face_pushed = False
+                STATE["events"] += 1
+                log.info("Motion event started.")
             event_until = now + EVENT_TAIL
 
-        if now < event_until and (now - last_save) >= EVENT_INTERVAL:
-            path = save_snapshot(frame)
-            log.info("Motion event (area=%d) -> %s", int(changed_area), os.path.basename(path))
-            last_save = now
-            STATE["events"] += 1
-            # Push to Telegram on a NEW event, then throttle during a long one.
-            if not event_was_active or (now - last_telegram) >= TELEGRAM_MIN_INTERVAL:
-                telegram_photo(path, caption=f"⚠️ Motion {datetime.now():%H:%M:%S}")
-                last_telegram = now
+        if now < event_until:
+            # Dense at the start of the event (catch the face), then slower for
+            # sustained activity (e.g. housekeeping) so we don't flood storage.
+            in_fast_phase = (now - event_start) < EVENT_FAST_WINDOW
+            interval = EVENT_FAST_INTERVAL if in_fast_phase else EVENT_SLOW_INTERVAL
+            if (now - last_save) >= interval:
+                path = save_snapshot(frame)
+                last_save = now
+                face = detect_face(frame)
+                # Front-load Telegram: push the first TELEGRAM_BURST frames of an
+                # event unthrottled; always push the first face frame; otherwise
+                # throttle. Every frame is saved locally + iCloud regardless.
+                push = (event_tg_count < TELEGRAM_BURST or
+                        (now - last_telegram) >= TELEGRAM_MIN_INTERVAL)
+                if face and not event_face_pushed:
+                    push = True
+                    event_face_pushed = True
+                tag = "👤 Face detected" if face else "⚠️ Motion"
+                log.info("%s (area=%d) -> %s", tag, int(changed_area), os.path.basename(path))
+                if push:
+                    telegram_photo(path, caption=f"{tag} {datetime.now():%H:%M:%S}")
+                    last_telegram = now
+                    event_tg_count += 1
 
         time.sleep(min_interval)
 

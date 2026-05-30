@@ -16,16 +16,41 @@ start so you can leave the room without tripping it.
 
 ---
 
-## Why this exists
+## The story
 
-This started as a plan to use the open-source `motion` daemon to watch a hotel
-room over a few days away. On macOS that plan falls apart: Homebrew's `motion`
-is an unrelated to-do app, and the real `motion` project only captures from
-Linux V4L2 (`/dev/video0`) or network cameras — it cannot read a Mac's built-in
-camera at all. Rather than carry extra hardware, mac-lookout rebuilds the same idea
-natively on macOS: OpenCV for detection, iCloud for off-device copies, `ffmpeg`
-only for a standalone test grab, and a Telegram bot for alerting and remote
-control. The original spec is preserved in git history.
+On a trip to Prague, I had the usual traveler's worry: a hotel room with my
+laptop, passport, and other valuables in it, and no good way to know whether
+anyone — housekeeping, or anyone else with a key — had been in while I was out.
+
+Then it clicked: the most valuable thing in the room was *also* a camera, a
+computer, and an internet connection. Why not make the laptop watch the room
+itself?
+
+That single idea set the requirements, and each one shaped the tool:
+
+- **Use only the laptop — no extra gear.** I was traveling, not carrying a
+  Raspberry Pi or an IP camera. → built around the **built-in FaceTime camera**.
+- **Get evidence off the device immediately.** If the laptop itself walked out
+  the door, local snapshots would walk with it. → every snapshot is **mirrored
+  to iCloud Drive**, so I can see it from my phone even if the Mac is gone.
+- **Alert me in real time, wherever I am.** A folder I check later isn't an
+  alarm. → a **Telegram bot** pushes each snapshot instantly, and lets me pull a
+  live photo, sound an alarm, or pause it on command.
+- **Keep watching with the screen locked.** I'd lock the screen and leave. → it
+  runs under **`caffeinate`** so the system stays awake and keeps capturing while
+  the display sleeps.
+- **Don't trip on me as I leave.** → an **arming delay** to walk out first.
+- **Catch a face, not a blur.** The first seconds of an event are when identity
+  is visible. → **dense capture up front** (plus optional face detection), then
+  it slows down for long activity like housekeeping.
+- **Tell me it's still alive.** A camera that silently died is worse than none.
+  → a **heartbeat** snapshot every 30 minutes.
+
+The original plan was the open-source `motion` daemon — but on macOS that's a
+dead end (Homebrew's `motion` is an unrelated to-do app, and the real one can't
+read the built-in camera). So this is that idea, rebuilt natively for a Mac.
+It's framed around the hotel-room case, but it's just a webcam motion monitor —
+home-office, front door, workshop, pet-cam, "did the courier come?" all work too.
 
 ---
 
@@ -35,16 +60,24 @@ control. The original spec is preserved in git history.
 - 🏃 **Motion detection** — frame differencing against a running-average
   background, tunable like the classic `motion.conf` knobs (threshold, noise
   floor, minimum motion frames), with an optional region-of-interest mask.
-- 🔥 **Event-burst capture** — on motion it saves a *sequence* (a frame every
-  ~1.5 s, continuing ~10 s after motion stops), not a single ambiguous frame.
+- 🔥 **Adaptive event capture** — on motion it saves a *sequence*: **dense at the
+  start** (catch the face/identity in the first seconds), then automatically
+  **slows down** during sustained activity (e.g. housekeeping) so you don't get
+  hundreds of near-identical frames. Capturing continues ~10 s after motion stops.
+- 👤 **Optional face detection** — when a face is found in a frame it's captioned
+  "Face detected" and pushed even if the throttle would skip it (Haar cascade
+  bundled with OpenCV — no extra dependencies; set `SM_FACE_DETECT=0` to disable).
 - ☁️ **iCloud Drive mirroring** — every snapshot is copied to
   `iCloud Drive/SecurityMonitor/` so there's an off-device copy.
-- 📲 **Telegram alerts + two-way control** — instant photo on motion, plus
-  remote commands restricted to **your chat only**:
+- 📲 **Telegram alerts + two-way control** — front-loaded photo push on motion
+  (first frames sent immediately so you actually see who arrived), plus remote
+  commands restricted to **your chat only**:
   - `/photo` — grab a picture right now (even with no motion)
-  - `/status` — armed/paused state, motion-event count, uptime
+  - `/status` — armed/paused state, event count, uptime
   - `/pause [min]` — pause detection for N minutes (default 10), **auto-rearms**
   - `/resume` — resume immediately
+  - `/say <text>` — speak text aloud in the room (deterrence: *"I can see you"*)
+  - `/alarm` — sound an alarm in the room
   - `/help` — list commands
 - ⏲️ **Arming delay** — `./start.sh 5` waits 5 minutes before detecting so you
   can walk out; you get an "ARMED" ping when it goes live.
@@ -155,11 +188,15 @@ Override any of these as environment variables (e.g. `SM_THRESHOLD=3000 ./start.
 | `SM_THRESHOLD` | `1500` | Min changed-pixel area to count as motion (↑ = less sensitive) |
 | `SM_NOISE_LEVEL` | `32` | Per-pixel diff intensity floor |
 | `SM_MIN_FRAMES` | `2` | Consecutive frames required to confirm motion |
-| `SM_EVENT_INTERVAL` | `1.5` | Seconds between burst frames during an event |
+| `SM_EVENT_FAST_INTERVAL` | `0.6` | Seconds between frames during the dense start-of-event phase |
+| `SM_EVENT_FAST_WINDOW` | `10` | How long (s) the dense phase lasts from the start of an event |
+| `SM_EVENT_SLOW_INTERVAL` | `3` | Seconds between frames during sustained activity |
 | `SM_EVENT_TAIL` | `10` | Seconds to keep capturing after motion stops |
+| `SM_FACE_DETECT` | `1` | Face detection on (`1`) / off (`0`) |
 | `SM_ARM_DELAY` | `0` | Arming delay in seconds (`start.sh` sets this from its minutes argument) |
 | `SM_HEARTBEAT_SECONDS` | `1800` | Heartbeat interval; `0` disables |
-| `SM_TELEGRAM_MIN_INTERVAL` | `30` | Min seconds between photo pushes during one event |
+| `SM_TELEGRAM_BURST` | `4` | Frames pushed to Telegram unthrottled at the start of an event |
+| `SM_TELEGRAM_MIN_INTERVAL` | `30` | Min seconds between pushes after the initial burst |
 | `SM_CAMERA_INDEX` | `0` | Camera index (`0` = built-in) |
 | `SM_WIDTH` / `SM_HEIGHT` / `SM_FRAMERATE` | `1280` / `720` / `15` | Capture settings |
 | `SM_MASK_FILE` | `mask.png` | Optional ROI mask: white = watch, black = ignore |

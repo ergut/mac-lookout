@@ -42,10 +42,22 @@ NOISE_LEVEL           = int(os.environ.get("SM_NOISE_LEVEL", "32"))   # binary d
 MINIMUM_MOTION_FRAMES = int(os.environ.get("SM_MIN_FRAMES", "2"))     # consecutive frames to confirm
 
 # Behaviour
-COOLDOWN_SECONDS = float(os.environ.get("SM_COOLDOWN", "2.0"))        # min gap between saved snapshots
-WARMUP_FRAMES    = int(os.environ.get("SM_WARMUP", "30"))            # frames to let exposure settle
-BG_ALPHA         = float(os.environ.get("SM_BG_ALPHA", "0.05"))      # running-avg learning rate
-JPEG_QUALITY     = int(os.environ.get("SM_JPEG_QUALITY", "90"))
+# Event-burst capture: when motion is confirmed we open an "event window" and
+# keep saving a frame every EVENT_INTERVAL seconds for as long as motion
+# continues, plus EVENT_TAIL seconds after it stops. This yields a *sequence*
+# of the intruder (far more useful than a single frame) without timelapsing an
+# empty room 24/7.
+EVENT_INTERVAL = float(os.environ.get("SM_EVENT_INTERVAL", "1.5"))   # gap between burst frames
+EVENT_TAIL     = float(os.environ.get("SM_EVENT_TAIL", "10.0"))      # keep capturing after motion stops
+WARMUP_FRAMES  = int(os.environ.get("SM_WARMUP", "30"))             # frames to let exposure settle
+BG_ALPHA       = float(os.environ.get("SM_BG_ALPHA", "0.05"))       # running-avg learning rate
+JPEG_QUALITY   = int(os.environ.get("SM_JPEG_QUALITY", "90"))
+
+# Arming delay: seconds to wait before detection begins, so you can leave the
+# room without tripping it. The camera stays on and keeps the baseline current
+# (and heartbeats still fire) during the countdown. start.sh exposes this as a
+# minutes argument: `./start.sh 5`.
+ARM_DELAY = float(os.environ.get("SM_ARM_DELAY", "0"))
 
 # Heartbeat: the detector holds the camera open, so it also emits the periodic
 # proof-of-life snapshot itself (a separate ffmpeg grab can't share the camera).
@@ -156,9 +168,10 @@ def main():
         sys.exit(1)
 
     log.info(
-        "Motion detector started. cam=%s %dx%d threshold=%d noise=%d min_frames=%d heartbeat=%ds",
+        "Motion detector started. cam=%s %dx%d threshold=%d noise=%d min_frames=%d "
+        "event_interval=%.1fs tail=%.0fs heartbeat=%ds arm_delay=%.0fs",
         CAMERA_INDEX, WIDTH, HEIGHT, THRESHOLD, NOISE_LEVEL, MINIMUM_MOTION_FRAMES,
-        HEARTBEAT_SECONDS,
+        EVENT_INTERVAL, EVENT_TAIL, HEARTBEAT_SECONDS, ARM_DELAY,
     )
 
     background = None          # float32 running-average frame
@@ -166,6 +179,10 @@ def main():
     motion_streak = 0
     last_save = 0.0
     last_heartbeat = 0.0       # 0 => emit one immediately after warm-up
+    event_until = 0.0          # keep saving burst frames until this time
+    last_countdown_log = 0.0
+    armed_announced = ARM_DELAY <= 0
+    arm_time = time.time() + ARM_DELAY
     frame_count = 0
     min_interval = 1.0 / max(FRAMERATE, 1)
 
@@ -193,6 +210,30 @@ def main():
             time.sleep(min_interval)
             continue
 
+        now = time.time()
+
+        # Periodic proof-of-life heartbeat (fires whether armed or not, so you
+        # get a snapshot as you leave during the arming countdown).
+        if HEARTBEAT_SECONDS > 0 and (now - last_heartbeat) >= HEARTBEAT_SECONDS:
+            hb = save_heartbeat(frame)
+            log.info("Heartbeat saved -> %s", os.path.basename(hb))
+            last_heartbeat = now
+
+        # Arming delay: keep the baseline current and DON'T detect yet, so you
+        # can walk out without tripping it. Detection begins once armed.
+        if now < arm_time:
+            background = gray.astype("float32")
+            if now - last_countdown_log >= 30:
+                log.info("Disarmed — detection starts in %ds (leave the room).",
+                         int(arm_time - now))
+                last_countdown_log = now
+            time.sleep(min_interval)
+            continue
+
+        if not armed_announced:
+            log.info("ARMED — motion detection active.")
+            armed_announced = True
+
         # Difference against the running-average background.
         delta = cv2.absdiff(gray, cv2.convertScaleAbs(background))
         cv2.accumulateWeighted(gray, background, BG_ALPHA)
@@ -206,23 +247,21 @@ def main():
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         changed_area = sum(cv2.contourArea(c) for c in contours)
 
-        # Periodic proof-of-life heartbeat from the same camera stream.
-        now = time.time()
-        if HEARTBEAT_SECONDS > 0 and (now - last_heartbeat) >= HEARTBEAT_SECONDS:
-            hb = save_heartbeat(frame)
-            log.info("Heartbeat saved -> %s", os.path.basename(hb))
-            last_heartbeat = now
-
+        # Confirm motion over consecutive frames, then open/extend the event
+        # window. While the window is open we save a frame every EVENT_INTERVAL,
+        # giving a sequence of the intruder rather than a single frame.
         if changed_area >= THRESHOLD:
             motion_streak += 1
         else:
             motion_streak = 0
 
-        if motion_streak >= MINIMUM_MOTION_FRAMES and (now - last_save) >= COOLDOWN_SECONDS:
+        if motion_streak >= MINIMUM_MOTION_FRAMES:
+            event_until = now + EVENT_TAIL
+
+        if now < event_until and (now - last_save) >= EVENT_INTERVAL:
             path = save_snapshot(frame)
-            log.info("Motion detected (area=%d) -> %s", int(changed_area), os.path.basename(path))
+            log.info("Motion event (area=%d) -> %s", int(changed_area), os.path.basename(path))
             last_save = now
-            motion_streak = 0
 
         time.sleep(min_interval)
 

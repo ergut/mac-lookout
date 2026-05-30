@@ -13,12 +13,23 @@
 #
 # Everything lives in the folder this script is in. Run it from Terminal (so
 # macOS attributes camera access to your session), then lock the screen and leave.
+#
+# Usage:  ./start.sh [ARM_DELAY_MINUTES]
+#   ./start.sh         -> arm immediately
+#   ./start.sh 5       -> wait 5 minutes before detecting (time to leave the room)
 
 set -u
 SM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDFILE="$SM_DIR/motion.pid"
 
+# Optional first arg = arming delay in MINUTES -> detector's SM_ARM_DELAY (seconds).
+DELAY_MIN="${1:-0}"
+export SM_ARM_DELAY="$(awk "BEGIN{print $DELAY_MIN * 60}")"
+
 echo "Starting security monitor... (base: $SM_DIR)"
+if [ "$DELAY_MIN" != "0" ]; then
+    echo "Arming delay: ${DELAY_MIN} min — detection starts after you leave."
+fi
 
 # --- Stop any existing detector ---
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -33,7 +44,7 @@ sleep 1
 #   -s  prevent system sleep (on AC)   (no -d, so the display may sleep)
 # Tuning knobs (override before calling, e.g. SM_THRESHOLD=2500 ./start.sh):
 #   SM_THRESHOLD (1500), SM_NOISE_LEVEL (32), SM_MIN_FRAMES (2),
-#   SM_HEARTBEAT_SECONDS (1800)
+#   SM_EVENT_INTERVAL (1.5), SM_EVENT_TAIL (10), SM_HEARTBEAT_SECONDS (1800)
 caffeinate -ims "$SM_DIR/.venv/bin/python" "$SM_DIR/motion_detect.py" \
     >>"$SM_DIR/motion_stdout.log" 2>&1 &
 WRAP_PID=$!

@@ -1,0 +1,238 @@
+# MacWatch — macOS Motion Security Monitor
+
+Turn a Mac and its **built-in FaceTime camera** into a motion-activated security
+camera — no extra hardware, no Raspberry Pi, no IP camera. When motion is
+detected it saves timestamped snapshots locally, mirrors them to **iCloud
+Drive**, and pushes them to your phone in real time over a **Telegram bot** that
+you can also command remotely (`/photo`, `/status`, `/pause`, `/resume`).
+
+It keeps working while the screen is locked, takes a periodic "heartbeat"
+snapshot so you know it's alive, and waits a configurable delay after you press
+start so you can leave the room without tripping it.
+
+> Built for the travel / hotel-room case — *"is anyone going into my room while
+> I'm out?"* — but it's just a webcam motion monitor, so the home-office,
+> front-door, workshop, pet-cam, and "did the courier come?" cases all work too.
+
+---
+
+## Why this exists
+
+This started as a plan to use the open-source `motion` daemon to watch a hotel
+room over a few days away. On macOS that plan falls apart: Homebrew's `motion`
+is an unrelated to-do app, and the real `motion` project only captures from
+Linux V4L2 (`/dev/video0`) or network cameras — it cannot read a Mac's built-in
+camera at all. Rather than carry extra hardware, MacWatch rebuilds the same idea
+natively on macOS: OpenCV for detection, iCloud for off-device copies, `ffmpeg`
+only for a standalone test grab, and a Telegram bot for alerting and remote
+control. The original spec is preserved in git history.
+
+---
+
+## Features
+
+- 🎥 **Built-in camera, no extra gear** — uses the Mac's FaceTime camera via OpenCV.
+- 🏃 **Motion detection** — frame differencing against a running-average
+  background, tunable like the classic `motion.conf` knobs (threshold, noise
+  floor, minimum motion frames), with an optional region-of-interest mask.
+- 🔥 **Event-burst capture** — on motion it saves a *sequence* (a frame every
+  ~1.5 s, continuing ~10 s after motion stops), not a single ambiguous frame.
+- ☁️ **iCloud Drive mirroring** — every snapshot is copied to
+  `iCloud Drive/SecurityMonitor/` so there's an off-device copy.
+- 📲 **Telegram alerts + two-way control** — instant photo on motion, plus
+  remote commands restricted to **your chat only**:
+  - `/photo` — grab a picture right now (even with no motion)
+  - `/status` — armed/paused state, motion-event count, uptime
+  - `/pause [min]` — pause detection for N minutes (default 10), **auto-rearms**
+  - `/resume` — resume immediately
+  - `/help` — list commands
+- ⏲️ **Arming delay** — `./start.sh 5` waits 5 minutes before detecting so you
+  can walk out; you get an "ARMED" ping when it goes live.
+- 💓 **Heartbeat** — a proof-of-life snapshot every 30 minutes; if heartbeats
+  stop, you know the monitor died.
+- 🔒 **Survives screen lock** — runs under `caffeinate` so the system stays
+  awake and keeps capturing while the display sleeps and the screen is locked.
+
+---
+
+## How it works
+
+A single Python process (`motion_detect.py`) owns the camera and runs the
+detection loop. Because macOS allows only **one** process to use the camera at a
+time, everything that needs a frame — motion snapshots, the periodic heartbeat,
+and on-demand `/photo` — is served from that one loop. A daemon thread
+long-polls Telegram for your commands and answers using the latest frame.
+`start.sh` wraps the whole thing in `caffeinate` and backgrounds it; `stop.sh`
+shuts it down and releases the camera cleanly.
+
+```
+start.sh ── caffeinate ── python motion_detect.py
+                              ├── detection loop (owns camera)
+                              │     ├── motion → snapshots/ + iCloud + Telegram push
+                              │     └── heartbeat → heartbeat/ + iCloud
+                              └── Telegram listener thread (/photo /status /pause …)
+```
+
+---
+
+## Requirements
+
+- macOS (tested on Apple Silicon, macOS 26).
+- [Homebrew](https://brew.sh) with `ffmpeg` (for the optional standalone test grab).
+- [`uv`](https://github.com/astral-sh/uv) for the Python environment.
+- A Telegram account (optional, only if you want phone alerts/commands).
+- Camera permission for your terminal (macOS will prompt on first run).
+
+---
+
+## Setup
+
+```bash
+git clone <your-repo-url> motion-security
+cd motion-security
+
+# Python environment
+uv venv .venv
+source .venv/bin/activate
+uv pip install opencv-python-headless numpy
+
+# ffmpeg (only for the optional heartbeat.sh test grab)
+brew install ffmpeg
+```
+
+### Telegram (optional but recommended)
+
+1. In Telegram, message **@BotFather** → `/newbot` → copy the **bot token**.
+2. Send your new bot any message (so it may reply to you).
+3. Message **@userinfobot** to get your numeric **chat ID**.
+4. Create `secrets.env` from the template and fill both in:
+
+   ```bash
+   cp secrets.env.example secrets.env
+   chmod 600 secrets.env
+   # edit: SM_TELEGRAM_BOT_TOKEN=...  and  SM_TELEGRAM_CHAT_ID=...
+   ```
+
+`secrets.env` is gitignored and never committed. The token is passed to `curl`
+via stdin, so it does not appear in process listings.
+
+---
+
+## Usage
+
+```bash
+./start.sh        # default 5-minute arming delay, then watches the room
+./start.sh 0      # arm immediately (handy for testing)
+./start.sh 2      # 2-minute delay
+./stop.sh         # stop and release the camera
+```
+
+For a real deployment: run `./start.sh`, **lock the screen** (Ctrl+Cmd+Q), and
+leave — **keep the lid open and the power connected** so the camera keeps
+capturing while the display sleeps.
+
+Watch what's happening:
+
+```bash
+tail -f motion.log
+```
+
+### Where files go
+
+| Kind | Local | iCloud |
+|------|-------|--------|
+| Motion snapshots | `snapshots/` | `iCloud Drive/SecurityMonitor/snapshots/` |
+| Heartbeats | `heartbeat/` | `iCloud Drive/SecurityMonitor/heartbeat/` |
+
+---
+
+## Configuration
+
+Override any of these as environment variables (e.g. `SM_THRESHOLD=3000 ./start.sh`):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SM_THRESHOLD` | `1500` | Min changed-pixel area to count as motion (↑ = less sensitive) |
+| `SM_NOISE_LEVEL` | `32` | Per-pixel diff intensity floor |
+| `SM_MIN_FRAMES` | `2` | Consecutive frames required to confirm motion |
+| `SM_EVENT_INTERVAL` | `1.5` | Seconds between burst frames during an event |
+| `SM_EVENT_TAIL` | `10` | Seconds to keep capturing after motion stops |
+| `SM_ARM_DELAY` | `0` | Arming delay in seconds (`start.sh` sets this from its minutes argument) |
+| `SM_HEARTBEAT_SECONDS` | `1800` | Heartbeat interval; `0` disables |
+| `SM_TELEGRAM_MIN_INTERVAL` | `30` | Min seconds between photo pushes during one event |
+| `SM_CAMERA_INDEX` | `0` | Camera index (`0` = built-in) |
+| `SM_WIDTH` / `SM_HEIGHT` / `SM_FRAMERATE` | `1280` / `720` / `15` | Capture settings |
+| `SM_MASK_FILE` | `mask.png` | Optional ROI mask: white = watch, black = ignore |
+
+### Tuning
+
+- **Too many false triggers** (light changes, AC, shadows): raise `SM_THRESHOLD`
+  (try 2500–4000).
+- **Missing real motion**: lower `SM_THRESHOLD` (try 800–1200).
+- **Only watch part of the frame** (e.g. just the door): create a `mask.png` the
+  same size as the frame — white where you want detection, black elsewhere.
+
+---
+
+## Maintenance
+
+Snapshots and heartbeats accumulate indefinitely — by design, so evidence is
+never auto-deleted. Clean them up yourself after confirming iCloud has what you
+need:
+
+```bash
+rm -f snapshots/*.jpg heartbeat/*.jpg
+```
+
+---
+
+## Prior art
+
+The "camera + Telegram alerts" space is well-trodden; if you want a different
+platform, these are worth a look:
+
+- [scaidermern/piCamBot](https://github.com/scaidermern/piCamBot) — Raspberry Pi
+  + Telegram, rich `/arm` `/disarm` `/capture` `/status` command set.
+- [pchinea/telegram-surveillance-bot](https://github.com/pchinea/telegram-surveillance-bot)
+  — cross-platform OpenCV webcam bot driven entirely from Telegram.
+- [nicofirst1/MotionBot](https://github.com/nicofirst1/MotionBot) — OpenCV +
+  Telegram with face recognition.
+
+What MacWatch does differently: it targets the **macOS built-in camera**
+specifically, mirrors to **iCloud Drive**, survives **screen lock** via
+`caffeinate`, adds a **timed `/pause` that auto-rearms** (vs. plain on/off), and
+emits a **heartbeat** proof-of-life — a combination we didn't find in an
+existing project. If you know of one that overlaps more, an issue/PR is welcome.
+
+---
+
+## ⚠️ Responsible use & disclaimer
+
+This is a tool for monitoring **your own space, on your own device, with the
+consent of anyone who may be recorded.** Like any camera software, it can be
+misused — and that is on the user, not the authors.
+
+- **Know the law.** Recording people — especially audio, or in places where
+  there is a reasonable expectation of privacy (bathrooms, bedrooms, someone
+  else's home, hotel common areas) — is regulated and varies by country, state,
+  and context. It is your responsibility to comply with all applicable privacy,
+  surveillance, wiretapping, and consent laws where you are.
+- **Do not** use this to surveil people without their knowledge and consent, to
+  stalk or harass, in any location or manner that is illegal, or in any way that
+  violates someone's privacy or rights.
+- **No warranty.** This software is provided "as is", without warranty of any
+  kind. It may miss events, false-trigger, fail to upload, or stop without
+  notice. **Do not rely on it as your sole security measure.**
+- **No liability.** The authors and contributors accept no responsibility or
+  liability for any misuse, damage, loss, legal consequence, or harm arising
+  from the use of this software. By using it, you accept full responsibility for
+  how you deploy it and for complying with the law.
+
+Every technology can be used well or badly. Please use this one well.
+
+---
+
+## License
+
+No license is granted yet — add a `LICENSE` file before publishing (MIT is a
+common choice for a project like this). Until then, all rights reserved.

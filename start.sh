@@ -15,8 +15,9 @@
 # macOS attributes camera access to your session), then lock the screen and leave.
 #
 # Usage:  ./start.sh [ARM_DELAY_MINUTES]
-#   ./start.sh         -> arm immediately
-#   ./start.sh 5       -> wait 5 minutes before detecting (time to leave the room)
+#   ./start.sh         -> default 5 min delay (time to leave the room)
+#   ./start.sh 0       -> arm immediately (handy for testing)
+#   ./start.sh 2       -> wait 2 minutes before detecting
 
 set -u
 SM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,13 +29,16 @@ if [ -f "$SM_DIR/secrets.env" ]; then
     set -a; . "$SM_DIR/secrets.env"; set +a
 fi
 
-# Optional first arg = arming delay in MINUTES -> detector's SM_ARM_DELAY (seconds).
-DELAY_MIN="${1:-0}"
+# Optional first arg = arming delay in MINUTES (default 5) -> SM_ARM_DELAY (seconds).
+# Pass 0 to arm immediately (testing). Env SM_ARM_DELAY still overrides if set.
+DELAY_MIN="${1:-5}"
 export SM_ARM_DELAY="$(awk "BEGIN{print $DELAY_MIN * 60}")"
 
 echo "Starting security monitor... (base: $SM_DIR)"
 if [ "$DELAY_MIN" != "0" ]; then
     echo "Arming delay: ${DELAY_MIN} min — detection starts after you leave."
+else
+    echo "Arming immediately (no delay)."
 fi
 
 # --- Stop any existing detector ---

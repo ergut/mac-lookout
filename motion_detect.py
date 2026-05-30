@@ -22,6 +22,7 @@ import time
 import signal
 import shutil
 import logging
+import tempfile
 import threading
 import subprocess
 from datetime import datetime
@@ -280,6 +281,53 @@ def play_alarm():
     threading.Thread(target=run, daemon=True).start()
 
 
+def _telegram_get_file_path(file_id):
+    """Resolve a Telegram file_id to its server file_path via getFile."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
+    cmd = ["curl", "-s", "--max-time", "20", "-F", f"file_id={file_id}", "-K", "-"]
+    try:
+        r = subprocess.run(cmd, input=f'url="{url}"\n',
+                           capture_output=True, text=True, timeout=25)
+        data = json.loads(r.stdout or "{}")
+        if data.get("ok"):
+            return (data.get("result") or {}).get("file_path")
+        log.warning("Telegram getFile failed: %s", r.stdout[:160])
+    except Exception as e:
+        log.warning("Telegram getFile error: %s", e)
+    return None
+
+
+def play_voice(file_id):
+    """Download a Telegram voice/audio message and play it aloud in the room.
+
+    Telegram voice notes are OGG/Opus, which afplay can't play, so we transcode
+    to WAV with ffmpeg (already a dependency) and then afplay it. Non-blocking.
+    """
+    def run():
+        file_path = _telegram_get_file_path(file_id)
+        if not file_path:
+            telegram_text("Couldn't fetch that audio — try again.")
+            return
+        src = os.path.join(tempfile.gettempdir(), "sm_voice_in")
+        wav = os.path.join(tempfile.gettempdir(), "sm_voice_in.wav")
+        dl_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        ffmpeg = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+        try:
+            subprocess.run(["curl", "-s", "--max-time", "30", "-o", src, "-K", "-"],
+                           input=f'url="{dl_url}"\n', text=True, timeout=40)
+            conv = subprocess.run([ffmpeg, "-y", "-i", src, wav],
+                                  capture_output=True, timeout=40)
+            if conv.returncode != 0 or not os.path.exists(wav):
+                log.warning("voice transcode failed: %s", conv.stderr[-160:] if conv.stderr else "?")
+                telegram_text("Couldn't play that audio (transcode failed).")
+                return
+            subprocess.run(["afplay", wav], timeout=180)
+            log.info("Played voice message in the room.")
+        except Exception as e:
+            log.warning("voice playback failed: %s", e)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def send_ondemand_photo(reason="On-demand"):
     """Grab the most recent frame and push it to Telegram immediately."""
     frame = _get_latest_frame()
@@ -309,6 +357,7 @@ HELP_TEXT = (
     "/resume — resume detection now\n"
     "/say <text> — speak text aloud in the room\n"
     "/alarm — sound an alarm in the room\n"
+    "🎙️ send a voice message — play it aloud in the room\n"
     "/help — show this message"
 )
 
@@ -365,6 +414,12 @@ def telegram_listener():
             chat_id = str((msg.get("chat") or {}).get("id", ""))
             if chat_id != str(TELEGRAM_CHAT):
                 continue   # SECURITY: ignore anyone but the configured owner
+            # A voice note (or audio file) -> play it aloud in the room (intercom).
+            media = msg.get("voice") or msg.get("audio")
+            if media and media.get("file_id"):
+                play_voice(media["file_id"])
+                telegram_text("🔊 Playing your message in the room.")
+                continue
             raw = (msg.get("text") or "").strip()   # keep original case for /say
             parts = raw.split()
             cmd = parts[0].lower() if parts else ""

@@ -78,6 +78,7 @@ home-office, front door, workshop, pet-cam, "did the courier come?" all work too
   - `/resume` — resume immediately
   - `/say <text>` — speak text aloud in the room (deterrence: *"I can see you"*)
   - `/alarm` — sound an alarm in the room
+  - 🎙️ **send a voice message** — it plays aloud in the room (intercom)
   - `/help` — list commands
 - ⏲️ **Arming delay** — `./start.sh 5` waits 5 minutes before detecting so you
   can walk out; you get an "ARMED" ping when it goes live.

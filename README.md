@@ -1,4 +1,4 @@
-# MacWatch — macOS Motion Security Monitor
+# mac-lookout — macOS Motion Security Monitor
 
 Turn a Mac and its **built-in FaceTime camera** into a motion-activated security
 camera — no extra hardware, no Raspberry Pi, no IP camera. When motion is
@@ -22,7 +22,7 @@ This started as a plan to use the open-source `motion` daemon to watch a hotel
 room over a few days away. On macOS that plan falls apart: Homebrew's `motion`
 is an unrelated to-do app, and the real `motion` project only captures from
 Linux V4L2 (`/dev/video0`) or network cameras — it cannot read a Mac's built-in
-camera at all. Rather than carry extra hardware, MacWatch rebuilds the same idea
+camera at all. Rather than carry extra hardware, mac-lookout rebuilds the same idea
 natively on macOS: OpenCV for detection, iCloud for off-device copies, `ffmpeg`
 only for a standalone test grab, and a Telegram bot for alerting and remote
 control. The original spec is preserved in git history.
@@ -198,7 +198,7 @@ platform, these are worth a look:
 - [nicofirst1/MotionBot](https://github.com/nicofirst1/MotionBot) — OpenCV +
   Telegram with face recognition.
 
-What MacWatch does differently: it targets the **macOS built-in camera**
+What mac-lookout does differently: it targets the **macOS built-in camera**
 specifically, mirrors to **iCloud Drive**, survives **screen lock** via
 `caffeinate`, adds a **timed `/pause` that auto-rearms** (vs. plain on/off), and
 emits a **heartbeat** proof-of-life — a combination we didn't find in an
@@ -234,5 +234,4 @@ Every technology can be used well or badly. Please use this one well.
 
 ## License
 
-No license is granted yet — add a `LICENSE` file before publishing (MIT is a
-common choice for a project like this). Until then, all rights reserved.
+[MIT](LICENSE) — do whatever you want, no warranty. See the disclaimer above.

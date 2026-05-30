@@ -1,0 +1,21 @@
+# Python virtual environment
+.venv/
+
+# Captured images (runtime output — these can be large and are synced to iCloud)
+snapshots/
+heartbeat/
+
+# Optional ROI mask (user-specific)
+mask.png
+
+# Logs and runtime state
+*.log
+motion.pid
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS cruft
+.DS_Store

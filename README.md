@@ -122,8 +122,8 @@ start.sh ── caffeinate ── python motion_detect.py
 ## Setup
 
 ```bash
-git clone <your-repo-url> motion-security
-cd motion-security
+git clone https://github.com/ergut/mac-lookout
+cd mac-lookout
 
 # Python environment
 uv venv .venv

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/readme-banner.png" alt="mac-lookout" width="720">
+</p>
+
 # mac-lookout — macOS Motion Security Monitor
 
 Turn a Mac and its **built-in FaceTime camera** into a motion-activated security

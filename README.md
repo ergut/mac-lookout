@@ -72,7 +72,7 @@ home-office, front door, workshop, pet-cam, "did the courier come?" all work too
   "Face detected" and pushed even if the throttle would skip it (Haar cascade
   bundled with OpenCV — no extra dependencies; set `SM_FACE_DETECT=0` to disable).
 - ☁️ **iCloud Drive mirroring** — every snapshot is copied to
-  `iCloud Drive/SecurityMonitor/` so there's an off-device copy.
+  `iCloud Drive/mac-lookout/` so there's an off-device copy.
 - 📲 **Telegram alerts + two-way control** — front-loaded photo push on motion
   (first frames sent immediately so you actually see who arrived), plus remote
   commands restricted to **your chat only**:
@@ -116,8 +116,11 @@ start.sh ── caffeinate ── python motion_detect.py
 ## Requirements
 
 - macOS (tested on Apple Silicon, macOS 26).
-- [Homebrew](https://brew.sh) with `ffmpeg` (for the optional standalone test grab).
-- [`uv`](https://github.com/astral-sh/uv) for the Python environment.
+- [`uv`](https://github.com/astral-sh/uv) recommended for the Python environment —
+  `start.sh` auto-creates the venv with it. Any `python3` with OpenCV also works.
+- [Homebrew](https://brew.sh) with `ffmpeg` (optional — powers the voice intercom
+  and the standalone `heartbeat.sh` test grab).
+- iCloud Drive enabled (optional) to mirror snapshots off-device.
 - A Telegram account (optional, only if you want phone alerts/commands).
 - Camera permission for your terminal (macOS will prompt on first run).
 
@@ -128,15 +131,33 @@ start.sh ── caffeinate ── python motion_detect.py
 ```bash
 git clone https://github.com/ergut/mac-lookout
 cd mac-lookout
+./start.sh
+```
 
-# Python environment
+On first run, if `.venv` is missing and [`uv`](https://github.com/astral-sh/uv) is
+installed, `start.sh` offers to create the virtualenv and install the Python
+dependencies (OpenCV + numpy) automatically. It also runs preflight checks and
+warns about anything missing (OpenCV, ffmpeg, Telegram credentials, iCloud Drive).
+
+For the optional voice intercom (and the standalone `heartbeat.sh` test grab),
+install ffmpeg:
+
+```bash
+brew install ffmpeg
+```
+
+<details>
+<summary>Manual Python setup (no <code>uv</code>, or you prefer to do it yourself)</summary>
+
+```bash
 uv venv .venv
 source .venv/bin/activate
 uv pip install opencv-python-headless numpy
-
-# ffmpeg (only for the optional heartbeat.sh test grab)
-brew install ffmpeg
 ```
+
+`start.sh` also accepts an already-activated venv or any `python3`/`python` on
+your PATH — it just needs OpenCV importable there.
+</details>
 
 ### Telegram (optional but recommended)
 
@@ -153,6 +174,11 @@ brew install ffmpeg
 
 `secrets.env` is gitignored and never committed. The token is passed to `curl`
 via stdin, so it does not appear in process listings.
+
+Without Telegram configured, mac-lookout runs **local-only**: motion and
+heartbeat snapshots are still saved to `snapshots/` and `heartbeat/` (and
+mirrored to iCloud Drive), but there are no phone alerts, no remote commands,
+and no voice intercom. `start.sh` prints a warning when it starts in this mode.
 
 ---
 
@@ -179,8 +205,15 @@ tail -f motion.log
 
 | Kind | Local | iCloud |
 |------|-------|--------|
-| Motion snapshots | `snapshots/` | `iCloud Drive/SecurityMonitor/snapshots/` |
-| Heartbeats | `heartbeat/` | `iCloud Drive/SecurityMonitor/heartbeat/` |
+| Motion snapshots | `snapshots/` | `iCloud Drive/mac-lookout/snapshots/` |
+| Heartbeats | `heartbeat/` | `iCloud Drive/mac-lookout/heartbeat/` |
+
+The iCloud copy goes to a fixed path
+(`~/Library/Mobile Documents/com~apple~CloudDocs/mac-lookout/`), **independent of
+where you clone the repo** — so getting evidence off-device just requires being
+signed into iCloud with iCloud Drive enabled. If it's not, snapshots are still
+saved locally under the project folder; the iCloud copy is skipped and `start.sh`
+warns you at launch.
 
 ---
 

@@ -94,12 +94,12 @@ MASK_FILE = os.environ.get("SM_MASK_FILE", os.path.join(BASE_DIR, "mask.png"))
 LOCAL_DIR  = os.path.join(BASE_DIR, "snapshots")
 ICLOUD_DIR = os.path.join(
     HOME, "Library", "Mobile Documents", "com~apple~CloudDocs",
-    "SecurityMonitor", "snapshots",
+    "mac-lookout", "snapshots",
 )
 HB_LOCAL_DIR  = os.path.join(BASE_DIR, "heartbeat")
 HB_ICLOUD_DIR = os.path.join(
     HOME, "Library", "Mobile Documents", "com~apple~CloudDocs",
-    "SecurityMonitor", "heartbeat",
+    "mac-lookout", "heartbeat",
 )
 LOG_FILE = os.path.join(BASE_DIR, "motion.log")
 

@@ -123,6 +123,15 @@ if [ -z "${SM_TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${SM_TELEGRAM_CHAT_ID:-}" ]; the
     echo "  Setup:  cp secrets.env.example secrets.env  then add your bot token + chat id (see README 'Telegram')." >&2
 fi
 
+# Non-fatal: snapshots are mirrored to a fixed iCloud Drive path, independent of
+# where this repo lives. If iCloud Drive is disabled the mirror won't sync.
+ICLOUD_BASE="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+ICLOUD_DIR="$ICLOUD_BASE/mac-lookout"
+if [ ! -d "$ICLOUD_BASE" ]; then
+    echo "${C_YEL}Warning: iCloud Drive not found — snapshots will be saved locally only (no off-device copy).${C_RST}" >&2
+    echo "  Enable iCloud Drive in System Settings to mirror snapshots off-device." >&2
+fi
+
 # --- Start the detector under caffeinate, in the background ---
 #   -i  prevent system idle sleep      -m  prevent disk idle sleep
 #   -s  prevent system sleep (on AC)   (no -d, so the display may sleep)
@@ -137,9 +146,10 @@ echo "motion detector started under caffeinate (PID $WRAP_PID)"
 echo "system will stay awake; display may sleep; capture continues through screen lock"
 
 echo ""
-echo "Security monitor active. Snapshots syncing to iCloud."
+echo "Security monitor active."
 echo "  Local motion snapshots : $SM_DIR/snapshots/"
 echo "  Local heartbeats       : $SM_DIR/heartbeat/  (every 30 min)"
+echo "  iCloud mirror          : $ICLOUD_DIR/  (snapshots + heartbeat)"
 echo "  Logs                   : $SM_DIR/motion.log"
 echo ""
 echo "Now lock the screen (Ctrl+Cmd+Q) and leave. Keep the lid OPEN and power connected."

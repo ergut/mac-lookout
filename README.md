@@ -56,6 +56,13 @@ read the built-in camera). So this is that idea, rebuilt natively for a Mac.
 It's framed around the hotel-room case, but it's just a webcam motion monitor —
 home-office, front door, workshop, pet-cam, "did the courier come?" all work too.
 
+<p align="center">
+  <img src="assets/sample-face-detected.png" alt="Face detected alert in Telegram" width="360">
+  <br>
+  <em>The real thing in Prague: walking back into the room trips motion, and the
+  Telegram bot pushes a "Face detected" snapshot to my phone in seconds.</em>
+</p>
+
 ---
 
 ## Features
